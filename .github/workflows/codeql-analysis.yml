@@ -2,9 +2,7 @@ name: "CodeQL"
 
 on:
   pull_request:
-  schedule:
-    # run weekly new vulnerability was added to the database
-    - cron: '0 0 * * 0'
+  workflow_dispatch: {}
 
 jobs:
   analyze:
@@ -21,13 +19,88 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v3
 
+    - name: Configure CodeQL
+      run: |
+        mkdir -p .github/codeql
+        tee .github/codeql/codeql-config.yml <<EOF
+        queries:
+          - name: AUTOSAR
+            uses: github/codeql-coding-standards/cpp/autosar/src/codeql-suites/autosar-default.qls@v2.24.0
+        EOF
+
     - name: Initialize CodeQL
+      id: init
       uses: github/codeql-action/init@v3
       with:
         languages: ${{ matrix.language }}
+        tools: https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.14.6/codeql-bundle-linux64.tar.gz
+        config-file: .github/codeql/codeql-config.yml
 
     - name: Autobuild
       uses: github/codeql-action/autobuild@v3
 
     - name: Perform CodeQL Analysis
+      id: codeql
       uses: github/codeql-action/analyze@v3
+
+    - # NOTE: analysis_report.py expects `.runs[0].tool.driver.rules[]` e.g. --no-sarif-group-rules-by-pack
+      name: Create sarif for report generation
+      run: |
+        ${{ steps.init.outputs.codeql-path }} database interpret-results \
+            --threads=${{ env.CODEQL_THREADS }} \
+            --format=sarifv2.1.0 \
+            --output=${{ steps.codeql.outputs.sarif-output }}/cpp-report.sarif \
+            --sarif-add-snippets \
+            --print-diagnostics-summary \
+            --print-metrics-summary \
+            --sarif-add-query-help \
+            --no-sarif-group-rules-by-pack \
+            --sarif-codescanning-config ${{ runner.temp }}/user-config.yaml \
+            --sarif-category /language:c-cpp \
+            --sarif-add-baseline-file-info \
+            --sarif-include-diagnostics \
+            ${{ fromJson(steps.codeql.outputs.db-locations).cpp }}
+
+    - name: Upload CodeQL sarif to workflow artifact (used for markdown report generation)
+      uses: actions/upload-artifact@v3
+      with:
+        name: cpp-report.sarif
+        path: |
+          ${{ steps.codeql.outputs.sarif-output }}/cpp-report.sarif
+        if-no-files-found: error
+
+    - name: Generate compliance report
+      run: |
+        rm -rf ./report
+        PATH=${PATH}:$(dirname "${{ steps.init.outputs.codeql-path }}")
+        python3 ${{ runner.temp }}/codeql_databases/temp/external-repos/0-codeql-coding-standards/scripts/reports/analysis_report.py \
+          ${{ fromJson(steps.codeql.outputs.db-locations).cpp }} \
+          ${{ steps.codeql.outputs.sarif-output }}/cpp-report.sarif \
+          ./report
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: report
+        path: |
+          ./report
+          ./report/database_integrity_report.md
+          ./report/deviations_report.md
+          ./report/guideline_compliance_summary.md
+          ./report/guideline_recategorizations_report.md
+        if-no-files-found: error
+
+    - name: Print step summary
+      working-directory: ./report
+      run: |
+        function print_markdown_report () {
+          markdownfile=$1
+          echo "<details>"
+          echo "<summary>\`${filename}\`</summary>"
+          cat ${filename}
+          echo "</details>"
+        }
+        for filename in *.md; do
+          [ -e "$filename" ] || continue
+          print_markdown_report ${filename} >> $GITHUB_STEP_SUMMARY
+        done
