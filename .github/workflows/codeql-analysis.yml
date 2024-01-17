@@ -21,6 +21,7 @@ jobs:
 
     - name: Configure CodeQL
       run: |
+        mkdir -p .github/codeql
         tee .github/codeql/codeql-config.yml <<EOF
         queries:
           - name: AUTOSAR
